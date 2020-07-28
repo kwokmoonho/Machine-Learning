@@ -1,0 +1,321 @@
+---
+title: "Analysis - Housing Selling Prices"
+date: "3/11/2020"
+output: 
+  html_document:
+    theme: cerulean
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE)
+pacman::p_load(mosaic, tidyverse, dplyr, plotly, pander, tsfknn, ggplot2, gganimate, DT, tidyquant, quantmod, dygraphs, xts, PerformanceAnalytics, timetk, ggpubr, broom, plotly, reshape2, foreach, doParallel,corrplot,caret,car)
+```
+
+## Analysis
+
+1. I crated a `TotalSqft` column by adding basement, pool, wood deck, Open porch, screen porch, and above grade (ground) living area square feet. The column should represent the total surface area of the property.
+2. I created a column `HasGarage` to determine if the property has a garage or not.
+3. I created a column `HasFire` to determine if the property has a fireplaces or not.
+
+
+```{r}
+#read data
+train <- read.csv("train.csv", header=TRUE)
+set.seed(999)
+train <- train %>%
+  mutate(TotalSqft = TotalBsmtSF + GrLivArea + PoolArea + WoodDeckSF + GarageArea + OpenPorchSF + ScreenPorch  + X3SsnPorch+ MasVnrArea) %>%
+  mutate(HasGarage = as.factor(ifelse(GarageArea > 0, "Yes", "No"))) %>% 
+  mutate(HasFire = as.factor(ifelse(Fireplaces > 0, "Yes", "No")))
+
+pairs(train[,c("SalePrice", "TotalSqft", "HasGarage", "CentralAir", "HasFire")], panel=panel.smooth)
+```
+
+I takes the `totalSqft` as the base variable, then construct the first lm.<br/>
+I removed the outliner 524 and 1299 and conducted a boxCox to find the transformation of TotalSqft.<br/>
+```{r}
+#This looks good, but outliner
+lm1 <- lm(SalePrice ~ TotalSqft, data=train)
+#try to create a lm base on total sq ft
+pander(summary(lm1))
+#significant p value, R2=61%
+
+plot(lm1, which=1)
+#outliner 524 and 1299
+
+## Remove outliers 524 and 1299
+#don't mess up original datta 
+train2 <- train[-c(524,1299), ]
+
+lm1 <- lm(SalePrice ~ TotalSqft, data=train2)
+pander(summary(lm1))
+boxCox(lm1)
+
+lm2 <- lm(log(SalePrice) ~ TotalSqft, data=train2)
+b2 <- coef(lm2)
+pander(summary(lm2))
+
+#plot back with original data
+plot(SalePrice ~ TotalSqft, data=train)
+b <- coef(lm2)
+curve(exp(b2[1] + b2[2]*x), add=TRUE, col="orange")
+title("Transformation of TotalSqt to SalePrice")
+```
+
+The year of the house sold always affect by when the house built or remodel. Therefore I conducted a summary on the `YrSold` and `YearRemodAdd` to find the mean, median, Q1,Q3,Max, and min of the house year built and remodel.<br/>
+I found that most of the house sold at 2008 and all the house in the data set has remodel. Average years of house got remodel is at 1985. Therefore, I created a new column `BorRB` to see if the house is remodel before 1985 or not. This is base on the assumption that the newer the house get remodel, the higher the sale price. It's hard to set a rule on new or old, therefore I used the average years of house got remodel, which is 1985 year.
+
+
+```{r}
+summary(train$YrSold)
+#all these houses sold at a mean year 2008. 
+
+sum(is.na(train$YearRemodAdd))
+#all house has Remodel
+
+summary(train$YearRemodAdd)
+#mean 1985
+
+#remodel above the average.
+#suppose the neweer the house or remodel, the better the selling price.
+#So we will usee the mean as aa cut off point.
+train <- train %>% mutate(BorRB = as.factor(ifelse(YearRemodAdd >= 1985, "Yes", "No")))
+
+pairs(train[,c("SalePrice", "TotalSqft", "HasGarage", "CentralAir", "BorRB", "HasFire")], panel=panel.smooth)
+
+#remove the outliner from the above part
+train2 <- train[-c(524,1299), ]
+
+
+lm3 <- lm(log(SalePrice) ~ TotalSqft + HasGarage + CentralAir  + HasFire + TotalSqft:BorRB, data = train2)
+pander(summary(lm3))
+```
+
+All the variable are significant and the adjusted $R^2$ is 82.56%. 
+
+#### Graphing the model:
+```{r}
+b <- coef(lm3)
+#baase line
+plot(SalePrice ~ TotalSqft, data=train)
+#      3  4  5 6         6 only change the slope, not intercept, which is the x term
+# [1] "No.N.No.No"    "Yes.N.No.No"   "No.Y.No.No"    "Yes.Y.No.No"   "No.N.Yes.No"   "Yes.N.Yes.No" 
+# [7] "No.Y.Yes.No"   "Yes.Y.Yes.No"  "No.N.No.Yes"   "Yes.N.No.Yes"  "No.Y.No.Yes"   "Yes.Y.No.Yes" 
+# [13] "Yes.N.Yes.Yes" "No.Y.Yes.Yes"  "Yes.Y.Yes.Yes"
+
+curve(exp(b[1] + b[2]*x), add=TRUE) #N.N.N.N
+# 
+curve(exp((b[1]+b[3])+(b[2])*x) ,add = TRUE) #"Yes.N.No.No"
+# 
+curve(exp((b[1]+b[4])+(b[2])*x) ,add = TRUE) #"No.Y.No.No"
+#
+curve(exp((b[1]+b[3]+b[4])+(b[2])*x),add = TRUE) #"Yes.Y.No.No" 
+#
+curve(exp((b[1]+b[5])+(b[2])*x) ,add = TRUE) #"No.N.Yes.No"
+#
+curve(exp((b[1]+b[3]+b[5])+(b[2])*x) ,add = TRUE) #"Yes.N.Yes.No" 
+#
+curve(exp((b[1]+b[4]+b[5])+(b[2])*x) ,add = TRUE) #"No.Y.Yes.No"
+#
+curve(exp((b[1]+b[3]+b[4]+b[5])+(b[2])*x) ,add = TRUE) #"Yes.Y.Yes.No"
+#
+curve(exp((b[1])+(b[2]+b[6])*x) ,add = TRUE) #"No.N.No.Yes"
+#
+curve(exp((b[1]+b[3])+(b[2]+b[6])*x) ,add = TRUE) #"Yes.N.No.Yes"
+#
+curve(exp((b[1]+b[4])+(b[2]+b[6])*x) ,add = TRUE) #"No.Y.No.Yes" 
+#
+curve(exp((b[1]+b[3]+b[4])+(b[2]+b[6])*x) ,add = TRUE) #"Yes.Y.No.Yes" 
+#
+curve(exp((b[1]+b[3]+b[5])+(b[2]+b[6])*x) ,add = TRUE) #"Yes.N.Yes.Yes"
+#
+curve(exp((b[1]+b[4]+b[5])+(b[2]+b[6])*x) ,add = TRUE) #"No.Y.Yes.Yes"
+#
+curve(exp((b[1]+b[3]+b[4]+b[5])+(b[2]+b[6])*x) ,add = TRUE) #"Yes.Y.Yes.Yes"
+title("Final Graph of the model")
+```
+
+
+#### Checking the assumption:
+
+1. The regression relation between Y and X is linear.
+2. The error terms are normally distributed with E{ϵi}=0.
+3. The variance of the error terms is constant over all X values.
+4. The X values can be considered fixed and measured without error.
+5. The error terms are independent.
+
+```{r}
+plot(lm3, which = 1)
+plot(lm3, which = 2)
+plot(lm3, which = 3)
+```
+
+The Assumption 2 may not be really valid since there is a heavy tail on the normal Q-Q plot, but everything look fine. We will go to validation in the below.
+
+ 
+ 
+## Model Validation
+```{r}
+nrow(train)
+set.seed(121)
+keep <- sample(1:nrow(train), 1000)
+mytrain <- train[keep,]
+mytest <- train[-keep,]
+
+mytrain_lm <- mytrain[-c(524,1299),]
+
+## Okay to filter when running the lm...
+which(rownames(mytrain) %in% c(411,633,917))
+lm_train <- lm(log(SalePrice) ~ TotalSqft + HasGarage + CentralAir  + HasFire + TotalSqft:BorRB, data =mytrain[-c(174,264,300),])
+summary(lm_train)
+plot(lm_train, which=1)
+
+### Impute missing values
+apply(mytest[,c("TotalSqft","HasGarage","CentralAir","HasFire")], 2, function(x) sum(is.na(x)))
+mytest$TotalSqft = ifelse(is.na(mytest$TotalSqft),
+                     ave(mytest$TotalSqft, FUN = function(x) mean(x, na.rm = TRUE)),
+                     mytest$TotalSqft)
+
+
+#Validation
+yhat <- predict(lm_train, newdata=mytest)
+sum(is.na(yhat)) 
+
+Y <- log(mytest$SalePrice) #make sure Y is on the same scale that you used in your lm
+
+SSTO <- sum( (Y - mean(Y))^2 )
+SSE <- sum( (Y - yhat)^2 )
+n <- nrow(mytest)
+p <- length(coef(lm_train))
+adjr2 <- 1 - (n-1)/(n-p)*SSE/SSTO 
+summary(lm_train)$adj.r.squared 
+
+
+## Draw it
+b <- coef(lm_train)
+
+#baase line
+plot(SalePrice ~ TotalSqft, data=mytrain)
+#      3  4  5 6         6 only change the slope, not intercept, which is the x term
+# [1] "No.N.No.No"    "Yes.N.No.No"   "No.Y.No.No"    "Yes.Y.No.No"   "No.N.Yes.No"   "Yes.N.Yes.No" 
+# [7] "No.Y.Yes.No"   "Yes.Y.Yes.No"  "No.N.No.Yes"   "Yes.N.No.Yes"  "No.Y.No.Yes"   "Yes.Y.No.Yes" 
+# [13] "Yes.N.Yes.Yes" "No.Y.Yes.Yes"  "Yes.Y.Yes.Yes"
+
+curve(exp(b[1] + b[2]*x), add=TRUE) #N.N.N.N
+# 
+curve(exp((b[1]+b[3])+(b[2])*x) ,add = TRUE) #"Yes.N.No.No"
+# 
+curve(exp((b[1]+b[4])+(b[2])*x) ,add = TRUE) #"No.Y.No.No"
+#
+curve(exp((b[1]+b[3]+b[4])+(b[2])*x),add = TRUE) #"Yes.Y.No.No" 
+#
+curve(exp((b[1]+b[5])+(b[2])*x) ,add = TRUE) #"No.N.Yes.No"
+#
+curve(exp((b[1]+b[3]+b[5])+(b[2])*x) ,add = TRUE) #"Yes.N.Yes.No" 
+#
+curve(exp((b[1]+b[4]+b[5])+(b[2])*x) ,add = TRUE) #"No.Y.Yes.No"
+#
+curve(exp((b[1]+b[3]+b[4]+b[5])+(b[2])*x) ,add = TRUE) #"Yes.Y.Yes.No"
+#
+curve(exp((b[1])+(b[2]+b[6])*x) ,add = TRUE) #"No.N.No.Yes"
+#
+curve(exp((b[1]+b[3])+(b[2]+b[6])*x) ,add = TRUE) #"Yes.N.No.Yes"
+#
+curve(exp((b[1]+b[4])+(b[2]+b[6])*x) ,add = TRUE) #"No.Y.No.Yes" 
+#
+curve(exp((b[1]+b[3]+b[4])+(b[2]+b[6])*x) ,add = TRUE) #"Yes.Y.No.Yes" 
+#
+curve(exp((b[1]+b[3]+b[5])+(b[2]+b[6])*x) ,add = TRUE) #"Yes.N.Yes.Yes"
+#
+curve(exp((b[1]+b[4]+b[5])+(b[2]+b[6])*x) ,add = TRUE) #"No.Y.Yes.Yes"
+#
+curve(exp((b[1]+b[3]+b[4]+b[5])+(b[2]+b[6])*x) ,add = TRUE) #"Yes.Y.Yes.Yes"
+title("Final Graph of the model")
+```
+
+
+##### Validation conclusion
+The original R2 is 80.45%, but the validation adj R2 is 67.37%.
+
+
+## Interpretation
+`log(SalePrice) ~ TotalSqft + HasGarage + CentralAir  + HasFire + TotalSqft:BorRB`
+<br/>
+Since everything is in log(SalePrice) space, we have to interpret each coefficient by exp(b) and it's percentage change on the SalePrice.
+<br/>
+For: `curve(exp(b[1] + b[2]*x), add=TRUE) #N.N.N.N `<br/>
+The base price for the house which does not has a garage, central air system, fire place and did not remodel before 1985 year is $53256.81  <br/>
+There are 1.968% increase in SalePrice for every addition 100 square feet increase in TotalSqft.
+<br/>
+<br/>
+
+For: `curve(exp((b[1]+b[3])+(b[2])*x) ,add = TRUE) #"Yes.N.No.No"`<br/>
+The y-intercept, which is the base price for the housing has a garage increase by 15.6%. The slope remain the same, which means that there are 1.968% increase in SalePrice for every addition 100 square feet increase in TotalSqft.
+<br/>
+<br/>
+
+For `curve(exp((b[1]+b[4])+(b[2])*x) ,add = TRUE) #"No.Y.No.No"`<br/>
+The y-intercept, which is the base price for the housing has a central air system increase by 20.5%. The slope remain the same, which means that there are 1.968% increase in SalePrice for every addition 100 square feet increase in TotalSqft.
+<br/>
+<br/>
+
+For `curve(exp((b[1]+b[3]+b[4])+(b[2])*x),add = TRUE) #"Yes.Y.No.No" `<br/>
+The y-intercept, which is the base price for the housing has a central air system and garage increase by 39.3%. The slope remain the same, which means that there are 1.968% increase in SalePrice for every addition 100 square feet increase in TotalSqft.
+<br/>
+<br/>
+
+For `curve(exp((b[1]+b[5])+(b[2])*x) ,add = TRUE) #"No.N.Yes.No"`<br/>
+The y-intercept, which is the base price for the housing has a fire place increase by 12%. The slope remain the same, which means that there are 1.968% increase in SalePrice for every addition 100 square feet increase in TotalSqft.
+<br/>
+<br/>
+
+For `curve(exp((b[1]+b[3]+b[5])+(b[2])*x) ,add = TRUE) #"Yes.N.Yes.No" `<br/>
+The y-intercept, which is the base price for the housing has a fire place and garage increase by 29.5%. The slope remain the same, which means that there are 1.968% increase in SalePrice for every addition 100 square feet increase in TotalSqft.
+<br/>
+<br/>
+
+For `curve(exp((b[1]+b[4]+b[5])+(b[2])*x) ,add = TRUE) #"No.Y.Yes.No"`<br/>
+The y-intercept, which is the base price for the housing has a central air system and fire place increase by 35%. The slope remain the same, which means that there are 1.968% increase in SalePrice for every addition 100 square feet increase in TotalSqft.
+<br/>
+<br/>
+
+For `curve(exp((b[1]+b[3]+b[4]+b[5])+(b[2])*x) ,add = TRUE) #"Yes.Y.Yes.No"`<br/>
+The y-intercept, which is the base price for the housing has a central air system, garage, and fire place increase by 56.2%. The slope remain the same, which means that there are 1.968% increase in SalePrice for every addition 100 square feet increase in TotalSqft.
+<br/>
+<br/>
+
+For `curve(exp((b[1])+(b[2]+b[6])*x) ,add = TRUE) #"No.N.No.Yes"`<br/>
+When the house remodel after 1985 year<br/>
+The y-intercept, which is the base price for the housing is $53256.81. The slope has changed by `exp(b[6])`, which means that there are `exp((b[2]+b[6])*100)`25.6% increase in SalePrice for every addition 100 square feet increase in TotalSqft.
+<br/>
+<br/>
+
+For `curve(exp((b[1]+b[3])+(b[2]+b[6])*x) ,add = TRUE) #"Yes.N.No.Yes"`<br/>
+The y-intercept, which is the base price for the housing has a garage and remodel after 1985 years increase by 15.6%. The slope has changed by `exp(b[6])`, which means that there are `exp((b[2]+b[6])*100)`25.6% increase in SalePrice for every addition 100 square feet increase in TotalSqft. 
+<br/>
+<br/>
+
+For `curve(exp((b[1]+b[4])+(b[2]+b[6])*x) ,add = TRUE) #"No.Y.No.Yes" `<br/>
+The y-intercept, which is the base price for the housing has a central air system and remodel after 1985 year increase by 20.5%. The slope has changed by `exp(b[6])`, which means that there are `exp((b[2]+b[6])*100)`25.6% increase in SalePrice for every addition 100 square feet increase in TotalSqft. 
+<br/>
+<br/>
+
+For `curve(exp((b[1]+b[3]+b[4])+(b[2]+b[6])*x) ,add = TRUE) #"Yes.Y.No.Yes" `<br/>
+The y-intercept, which is the base price for the housing has a central air system, garage,and remodel after 1985 year increase by 39.4%. The slope has changed by `exp(b[6])`, which means that there are `exp((b[2]+b[6])*100)`25.6% increase in SalePrice for every addition 100 square feet increase in TotalSqft. 
+<br/>
+<br/>
+
+For `curve(exp((b[1]+b[3]+b[5])+(b[2]+b[6])*x) ,add = TRUE) #"Yes.N.Yes.Yes"`<br/>
+The y-intercept, which is the base price for the housing has a fire place, garage,and remodel after 1985 year increase by 29.5%. The slope has changed by `exp(b[6])`, which means that there are `exp((b[2]+b[6])*100)`25.6% increase in SalePrice for every addition 100 square feet increase in TotalSqft. 
+<br/>
+<br/>
+
+For `curve(exp((b[1]+b[4]+b[5])+(b[2]+b[6])*x) ,add = TRUE) #"No.Y.Yes.Yes"`<br/>
+The y-intercept, which is the base price for the housing has a fire place, central air system,and remodel after 1985 year increase by 35%. The slope has changed by `exp(b[6])`, which means that there are `exp((b[2]+b[6])*100)`25.6% increase in SalePrice for every addition 100 square feet increase in TotalSqft. 
+<br/>
+<br/>
+
+For `curve(exp((b[1]+b[3]+b[4]+b[5])+(b[2]+b[6])*x) ,add = TRUE) #"Yes.Y.Yes.Yes"`<br/>
+The y-intercept, which is the base price for the housing has garage, a fire place, central air system,and remodel after 1985 year increase by 56.2%. The slope has changed by `exp(b[6])`, which means that there are `exp((b[2]+b[6])*100)`25.6% increase in SalePrice for every addition 100 square feet increase in TotalSqft. 
+<br/>
+<br/>
